@@ -1,6 +1,6 @@
 # Spokes Todo MCP
 
-[![ci](https://github.com/brandonnorsworthy/spokes/actions/workflows/ci.yml/badge.svg)](https://github.com/brandonnorsworthy/spokes/actions/workflows/ci.yml) [![codeql](https://github.com/brandonnorsworthy/spokes/actions/workflows/codeql.yml/badge.svg)](https://github.com/brandonnorsworthy/spokes/actions/workflows/codeql.yml)
+[![ci](https://github.com/ogl33t/spokes/actions/workflows/ci.yml/badge.svg)](https://github.com/ogl33t/spokes/actions/workflows/ci.yml) [![codeql](https://github.com/ogl33t/spokes/actions/workflows/codeql.yml/badge.svg)](https://github.com/ogl33t/spokes/actions/workflows/codeql.yml)
 
 One small self-hosted server that holds one tree of to-dos, which any MCP-capable model can read, plan into and work from. A fresh chat can ask "what should I do next?" and get a short, ranked answer. Parallel agents can each take a task without colliding.
 
@@ -139,13 +139,13 @@ To undo a restore, stop the server and move the `before-restore` file(s) back.
 
 ## Deployment
 
-The homelab runs the published image from the `spokes/` stack in the Arcane `stacks` repo (`~/dev/stacks/spokes`, `/srv/stacks/spokes` on the server; its README covers start/stop, clients and backups): `ghcr.io/brandonnorsworthy/spokes:<X.Y.Z>` pinned, port `10050` -> `8787`, UID `10010`, `./data` bind mount for the database and backups. The server never builds; it pulls the tag CI published.
+This is the `ogl33t` fork of [brandonnorsworthy/spokes](https://github.com/brandonnorsworthy/spokes). The homelab runs the published image from the `kdev3/spokes/` stack in [ogl33t/stacks](https://github.com/ogl33t/stacks) (Arcane Git Sync; the stack README covers ports, UIDs and data): `ghcr.io/ogl33t/spokes:latest`, port `10050` -> `8787`, UID `10010`, `./data` bind mount for the database and backups. The server never builds; it pulls the image CI published.
 
 ## CI and releases
 
 - `.github/workflows/ci.yml` (check name `ci`): `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, `cargo test --locked`, and a non-pushing `docker build`, on every PR, push to `main` and weekly. Dependency review on PRs.
 - `.github/workflows/codeql.yml`: CodeQL for Rust and for the workflows (`actions`), on PRs, `main` and weekly.
-- `.github/workflows/release.yml`: on push to `main` and on `v*` tags, reruns `ci`, then builds and pushes `ghcr.io/brandonnorsworthy/spokes` (`latest` and `sha-<short>` from `main`; `X.Y.Z` and `sha-<short>` from a tag) and scans it with Trivy (HIGH/CRITICAL fail the job).
+- `.github/workflows/release.yml`: on push to `main` and on `v*` tags, reruns `ci`, then builds and pushes `ghcr.io/ogl33t/spokes` (the image is named after the repo owner) (`latest` and `sha-<short>` from `main`; `X.Y.Z` and `sha-<short>` from a tag) and scans it with Trivy (HIGH/CRITICAL fail the job).
 - `.github/dependabot.yml`: weekly cargo, GitHub Actions and Docker base image updates. Actions are pinned to commit SHAs.
 
 Release process: the version in `Cargo.toml` (it is what `initialize` reports as `serverInfo.version`) is bumped by the git hooks, not by hand (see Development). Push to `main`, wait for green, then tag that commit `vX.Y.Z` with the version it carries and push the tag. Deploy by bumping the pinned tag in `stacks/spokes/compose.yml`; roll back by pinning the previous tag.

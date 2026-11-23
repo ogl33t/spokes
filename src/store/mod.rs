@@ -42,7 +42,7 @@ pub(crate) const NODE_COLS: &str = "n.id, n.parent_id, n.position, n.kind, n.ord
     (SELECT COUNT(*) FROM nodes c WHERE c.parent_id = n.id AND c.status != 'dropped') AS child_total,
     (SELECT COUNT(*) FROM nodes c WHERE c.parent_id = n.id AND c.status = 'done') AS child_done,
     COALESCE((SELECT p.ordered AND p.kind = 'task' FROM nodes p WHERE p.id = n.parent_id), 0) AS is_step,
-    n.answered_at, n.recur";
+    n.answered_at, n.recur, n.work_type, n.stage";
 
 pub(crate) fn node_from_row(r: &Row<'_>) -> rusqlite::Result<Node> {
     let text_enum = |idx: usize, value: String| {
@@ -54,6 +54,14 @@ pub(crate) fn node_from_row(r: &Row<'_>) -> rusqlite::Result<Node> {
     };
     let kind: String = r.get(3)?;
     let status: String = r.get(6)?;
+    let work_type = match r.get::<_, Option<String>>(23)? {
+        Some(v) => Some(v.parse().map_err(|_| text_enum(23, v))?),
+        None => None,
+    };
+    let stage = match r.get::<_, Option<String>>(24)? {
+        Some(v) => Some(v.parse().map_err(|_| text_enum(24, v))?),
+        None => None,
+    };
     Ok(Node {
         id: NodeId(r.get(0)?),
         parent_id: r.get::<_, Option<i64>>(1)?.map(NodeId),
@@ -78,6 +86,8 @@ pub(crate) fn node_from_row(r: &Row<'_>) -> rusqlite::Result<Node> {
         is_step: r.get(20)?,
         answered_at: r.get(21)?,
         recur: r.get(22)?,
+        work_type,
+        stage,
     })
 }
 

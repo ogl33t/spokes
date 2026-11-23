@@ -1,7 +1,7 @@
 ---
-status: Planned
+status: In progress
 spoke: SPOKE-8
-started:
+started: 2026-11-23
 finished:
 summary: Add an optional type (bug/feature/chore/idea/epic) and stage field to Spokes nodes, settable via add/update, shown on lines, filterable in search and next, exposed in /api.
 ---

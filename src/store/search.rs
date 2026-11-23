@@ -14,7 +14,7 @@ use rusqlite::{Connection, params};
 use super::focus::focus_numbers;
 use super::{ToolResult, db_err, require};
 use crate::format::{due_flag, is_unplanned, parse_date, progress, short_date};
-use crate::model::{DEFAULT_USER, Node, NodeId, ROOT_ID, Status};
+use crate::model::{DEFAULT_USER, Node, NodeId, ROOT_ID, Stage, Status, WorkType};
 use crate::text::{keywords, match_strength, normalize, trigrams};
 use crate::tools::args::SearchArgs;
 
@@ -41,6 +41,8 @@ struct Meta {
     title: String,
     status: Status,
     priority: Option<i64>,
+    work_type: Option<WorkType>,
+    stage: Option<Stage>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -58,8 +60,14 @@ struct Hit {
 }
 
 pub fn search(conn: &Connection, args: SearchArgs, today: NaiveDate) -> ToolResult {
+    let work_type = args
+        .work_type
+        .as_deref()
+        .map(WorkType::parse_loose)
+        .transpose()?;
+    let stage = args.stage.as_deref().map(Stage::parse_loose).transpose()?;
     let mut kws = keywords(&args.query);
-    if kws.is_empty() {
+    if kws.is_empty() && work_type.is_none() && stage.is_none() {
         return Err(
             "query has no words. Pass a few keywords as alternatives, e.g. \"server homelab nas\"."
                 .to_string(),
@@ -77,38 +85,25 @@ pub fn search(conn: &Connection, args: SearchArgs, today: NaiveDate) -> ToolResu
     };
     let include_done = args.include_done.unwrap_or(false);
 
-    let docs = candidates(conn, &kws)?;
-    let mut hits: Vec<Hit> = docs
-        .iter()
-        .filter_map(|(id, doc)| score(*id, doc, &kws, &phrase))
-        .collect();
-    // Typo fallback: a keyword nothing resembles in a title or alias gets a full scan
-    // of titles and aliases (short columns), since a typo may share no trigram at all.
-    let unmatched: Vec<String> = kws
-        .iter()
-        .filter(|k| k.chars().count() >= 4)
-        .filter(|k| {
-            !docs
-                .values()
-                .any(|d| best(k, &d.title, true) >= 0.6 || best(k, &d.aliases, true) >= 0.6)
-        })
-        .cloned()
-        .collect();
-    if !unmatched.is_empty() {
-        for (id, doc) in scan_titles(conn)? {
-            if docs.contains_key(&id) {
-                continue;
-            }
-            if let Some(hit) = score(id, &doc, &kws, &phrase) {
-                hits.push(hit);
-            }
-        }
-    }
-
     let meta = load_meta(conn)?;
+    let mut hits = if kws.is_empty() {
+        // Filters only: every node whose own type/stage match, ranked by level then id.
+        meta.keys()
+            .map(|id| Hit {
+                id: *id,
+                score: 0.0,
+                via: None,
+            })
+            .collect()
+    } else {
+        keyword_hits(conn, &kws, &phrase)?
+    };
     let mut hidden_closed = 0;
     hits.retain(|h| {
-        if h.id == ROOT_ID || !within(&meta, h.id, scope) {
+        if h.id == ROOT_ID
+            || !within(&meta, h.id, scope)
+            || !matches_filters(&meta, h.id, work_type, stage)
+        {
             return false;
         }
         if !include_done && closed_here_or_above(&meta, h.id) {
@@ -132,11 +127,19 @@ pub fn search(conn: &Connection, args: SearchArgs, today: NaiveDate) -> ToolResu
             "({hidden_closed} done or dropped matches hidden; pass include_done: true to see them.)"
         )
     });
+    let subject = if kws.is_empty() {
+        filter_label(work_type, stage)
+    } else {
+        kws.join(", ")
+    };
     if hits.is_empty() {
-        let mut out = format!(
-            "No matches for {}. Try synonyms or other spellings, or browse with get {ROOT_ID}.",
-            kws.join(", ")
-        );
+        let mut out = if kws.is_empty() {
+            format!("No matches for {subject}. Browse with get {ROOT_ID}.")
+        } else {
+            format!(
+                "No matches for {subject}. Try synonyms or other spellings, or browse with get {ROOT_ID}."
+            )
+        };
         if let Some(note) = hidden_note {
             out.push('\n');
             out.push_str(&note);
@@ -149,7 +152,7 @@ pub fn search(conn: &Connection, args: SearchArgs, today: NaiveDate) -> ToolResu
         "{} {} for {}:",
         hits.len(),
         if hits.len() == 1 { "match" } else { "matches" },
-        kws.join(", ")
+        subject
     )];
     for hit in hits.iter().take(limit) {
         let node = require(conn, hit.id)?;
@@ -170,6 +173,64 @@ pub fn search(conn: &Connection, args: SearchArgs, today: NaiveDate) -> ToolResu
     Ok(out.join("\n"))
 }
 
+/// Candidate hits for keywords: FTS scoring plus the typo fallback.
+fn keyword_hits(conn: &Connection, kws: &[String], phrase: &str) -> Result<Vec<Hit>, String> {
+    let docs = candidates(conn, kws)?;
+    let mut hits: Vec<Hit> = docs
+        .iter()
+        .filter_map(|(id, doc)| score(*id, doc, kws, phrase))
+        .collect();
+    // Typo fallback: a keyword nothing resembles in a title or alias gets a full scan
+    // of titles and aliases (short columns), since a typo may share no trigram at all.
+    let unmatched: Vec<String> = kws
+        .iter()
+        .filter(|k| k.chars().count() >= 4)
+        .filter(|k| {
+            !docs
+                .values()
+                .any(|d| best(k, &d.title, true) >= 0.6 || best(k, &d.aliases, true) >= 0.6)
+        })
+        .cloned()
+        .collect();
+    if !unmatched.is_empty() {
+        for (id, doc) in scan_titles(conn)? {
+            if docs.contains_key(&id) {
+                continue;
+            }
+            if let Some(hit) = score(id, &doc, kws, phrase) {
+                hits.push(hit);
+            }
+        }
+    }
+
+    Ok(hits)
+}
+
+/// The node's own type and stage must equal every filter given.
+fn matches_filters(
+    meta: &HashMap<NodeId, Meta>,
+    id: NodeId,
+    work_type: Option<WorkType>,
+    stage: Option<Stage>,
+) -> bool {
+    let Some(m) = meta.get(&id) else {
+        return false;
+    };
+    work_type.is_none_or(|t| m.work_type == Some(t)) && stage.is_none_or(|s| m.stage == Some(s))
+}
+
+/// `type bug, stage in_review`.
+fn filter_label(work_type: Option<WorkType>, stage: Option<Stage>) -> String {
+    let mut parts = Vec::new();
+    if let Some(t) = work_type {
+        parts.push(format!("type {t}"));
+    }
+    if let Some(s) = stage {
+        parts.push(format!("stage {s}"));
+    }
+    parts.join(", ")
+}
+
 /// `SPOKE-30 task p1 (0/4)  Homelab server migration  in Hobbies / Homelab  (alias "nas")`.
 fn result_line(
     node: &Node,
@@ -184,6 +245,12 @@ fn result_line(
     }
     if let Some(level) = effective_level(meta, node.id) {
         flags.push(format!("p{level}"));
+    }
+    if let Some(t) = node.work_type {
+        flags.push(t.to_string());
+    }
+    if let Some(st) = node.stage {
+        flags.push(st.to_string());
     }
     if let Some(n) = focus.get(&node.id) {
         flags.push(format!("focus #{n}"));
@@ -374,7 +441,8 @@ fn score(id: NodeId, doc: &Doc, kws: &[String], phrase: &str) -> Option<Hit> {
 fn load_meta(conn: &Connection) -> Result<HashMap<NodeId, Meta>, String> {
     let mut stmt = conn
         .prepare_cached(
-            "SELECT id, parent_id, title, status, priority FROM nodes WHERE user_id = ?1",
+            "SELECT id, parent_id, title, status, priority, work_type, stage
+             FROM nodes WHERE user_id = ?1",
         )
         .map_err(db_err)?;
     stmt.query_map(params![DEFAULT_USER], |r| {
@@ -386,6 +454,12 @@ fn load_meta(conn: &Connection) -> Result<HashMap<NodeId, Meta>, String> {
                 title: r.get(2)?,
                 status: status.parse().unwrap_or(Status::Open),
                 priority: r.get(4)?,
+                work_type: r
+                    .get::<_, Option<String>>(5)?
+                    .and_then(|t| WorkType::parse_loose(&t).ok()),
+                stage: r
+                    .get::<_, Option<String>>(6)?
+                    .and_then(|t| Stage::parse_loose(&t).ok()),
             },
         ))
     })
@@ -428,4 +502,114 @@ fn path_of(meta: &HashMap<NodeId, Meta>, id: NodeId) -> String {
         .collect();
     titles.reverse();
     titles.join(" / ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Kind;
+    use crate::store::add::{self, tests::args};
+    use crate::store::test_support::temp_db;
+
+    fn search_args(query: &str, work_type: Option<&str>, stage: Option<&str>) -> SearchArgs {
+        SearchArgs {
+            query: query.into(),
+            scope: None,
+            include_done: None,
+            limit: None,
+            work_type: work_type.map(String::from),
+            stage: stage.map(String::from),
+        }
+    }
+
+    fn today() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()
+    }
+
+    fn seeded(name: &str) -> (Connection, std::path::PathBuf) {
+        let (mut conn, dir) = temp_db(name);
+        add::add(&mut conn, args(None, "Crash bug", Kind::Task)).unwrap();
+        add::add(&mut conn, args(None, "Crash feature", Kind::Task)).unwrap();
+        add::add(&mut conn, args(None, "Plain crash", Kind::Task)).unwrap();
+        conn.execute(
+            "UPDATE nodes SET work_type = 'bug', stage = 'in_review' WHERE title = 'Crash bug'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE nodes SET work_type = 'feature', stage = 'idea' WHERE title = 'Crash feature'",
+            [],
+        )
+        .unwrap();
+        (conn, dir)
+    }
+
+    #[test]
+    fn empty_query_with_stage_lists_only_that_stage() {
+        let (conn, dir) = seeded("search-stage");
+        let out = search(&conn, search_args("", None, Some("In review")), today()).unwrap();
+        assert!(out.starts_with("1 match for stage in_review:"), "{out}");
+        assert!(out.contains("Crash bug"));
+        assert!(!out.contains("Crash feature") && !out.contains("Plain crash"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn empty_query_combines_filters_with_and() {
+        let (conn, dir) = seeded("search-and");
+        let out = search(&conn, search_args("", Some("bug"), Some("idea")), today()).unwrap();
+        assert!(
+            out.starts_with("No matches for type bug, stage idea."),
+            "{out}"
+        );
+        let out = search(
+            &conn,
+            search_args("", Some("bug"), Some("in_review")),
+            today(),
+        )
+        .unwrap();
+        assert!(
+            out.starts_with("1 match for type bug, stage in_review:"),
+            "{out}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn type_filter_drops_non_matching_keyword_hits() {
+        let (conn, dir) = seeded("search-type");
+        let out = search(&conn, search_args("crash", None, None), today()).unwrap();
+        assert!(out.starts_with("3 matches for crash:"), "{out}");
+        let out = search(&conn, search_args("crash", Some("bug"), None), today()).unwrap();
+        assert!(out.starts_with("1 match for crash:"), "{out}");
+        assert!(out.contains("Crash bug") && !out.contains("Crash feature"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bad_filter_value_errors() {
+        let (conn, dir) = seeded("search-bad");
+        let err = search(&conn, search_args("crash", Some("gremlin"), None), today()).unwrap_err();
+        assert!(err.contains("Use one of"), "{err}");
+        let err = search(&conn, search_args("", None, Some("nope")), today()).unwrap_err();
+        assert!(err.contains("Use one of"), "{err}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn empty_query_without_filter_still_errors() {
+        let (conn, dir) = seeded("search-empty");
+        let err = search(&conn, search_args("", None, None), today()).unwrap_err();
+        assert!(err.contains("query has no words"), "{err}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn result_lines_show_type_and_stage() {
+        let (conn, dir) = seeded("search-flags");
+        let out = search(&conn, search_args("crash bug", None, None), today()).unwrap();
+        let line = out.lines().find(|l| l.contains("Crash bug")).unwrap();
+        assert!(line.contains(" task bug in_review "), "{line}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

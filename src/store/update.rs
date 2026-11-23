@@ -5,11 +5,11 @@ use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
 use super::add::{
     AREA_RECUR, MAX_NOTES, clean_aliases, clean_date, clean_notes, clean_priority,
-    clean_recur_change, clean_title, recur_step_error,
+    clean_recur_change, clean_title, clean_updated, recur_step_error,
 };
 use super::{ToolResult, children, clean_agent, db_err, log_event, renew_leases, require, touch};
 use crate::db::now;
-use crate::model::{Kind, Status};
+use crate::model::{Kind, Stage, Status, WorkType};
 use crate::tools::args::UpdateArgs;
 
 pub fn update(conn: &mut Connection, args: UpdateArgs) -> ToolResult {
@@ -77,6 +77,24 @@ pub fn update(conn: &mut Connection, args: UpdateArgs) -> ToolResult {
             "recur cleared"
         });
     }
+    if let Some(t) = clean_updated(args.work_type.as_deref(), WorkType::parse_loose)? {
+        sets.push((
+            "work_type",
+            t.map_or(Value::Null, |t| Value::Text(t.as_str().to_string())),
+        ));
+        changed.push(if t.is_some() { "type" } else { "type cleared" });
+    }
+    if let Some(s) = clean_updated(args.stage.as_deref(), Stage::parse_loose)? {
+        sets.push((
+            "stage",
+            s.map_or(Value::Null, |s| Value::Text(s.as_str().to_string())),
+        ));
+        changed.push(if s.is_some() {
+            "stage"
+        } else {
+            "stage cleared"
+        });
+    }
     let replace_notes = args
         .notes
         .as_deref()
@@ -88,7 +106,7 @@ pub fn update(conn: &mut Connection, args: UpdateArgs) -> ToolResult {
     }
     if sets.is_empty() && replace_notes.is_none() && append.is_none() {
         return Err(
-            "nothing to update. Pass at least one field (title, kind, ordered, priority, due, defer_until, aliases, recur, notes, notes_append). To change status use set_status; to reparent use move."
+            "nothing to update. Pass at least one field (title, kind, type, stage, ordered, priority, due, defer_until, aliases, recur, notes, notes_append). To change status use set_status; to reparent use move."
                 .to_string(),
         );
     }
@@ -389,6 +407,59 @@ mod tests {
             (r.0.as_str(), r.2, r.3.as_deref()),
             ("Multi", Some(1), Some("2026-11-20"))
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sets_changes_and_clears_type_and_stage() {
+        let (mut conn, dir) = temp_db("up-type");
+        add(&mut conn, args(None, "Task", Kind::Task)).unwrap(); // 2
+        let ts = |conn: &Connection| -> (Option<String>, Option<String>) {
+            conn.query_row("SELECT work_type, stage FROM nodes WHERE id = 2", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap()
+        };
+        let out = up(
+            &mut conn,
+            json!({"id": 2, "type": "Bug", "stage": "In review"}),
+        )
+        .unwrap();
+        assert_eq!(out, "Updated SPOKE-2  Task  (type, stage)");
+        assert_eq!(ts(&conn), (Some("bug".into()), Some("in_review".into())));
+        up(
+            &mut conn,
+            json!({"id": 2, "type": "chore", "stage": "done"}),
+        )
+        .unwrap();
+        assert_eq!(ts(&conn), (Some("chore".into()), Some("done".into())));
+        let status: String = conn
+            .query_row("SELECT status FROM nodes WHERE id = 2", [], |r| r.get(0))
+            .unwrap();
+        assert_ne!(status, "done");
+        let out = up(&mut conn, json!({"id": 2, "type": " ", "stage": ""})).unwrap();
+        assert_eq!(out, "Updated SPOKE-2  Task  (type cleared, stage cleared)");
+        assert_eq!(ts(&conn), (None, None));
+        let detail: String = conn
+            .query_row(
+                "SELECT detail FROM events WHERE node_id = 2 AND type = 'updated' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(detail, "type cleared, stage cleared");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rejects_bad_type_and_stage() {
+        let (mut conn, dir) = temp_db("up-type-bad");
+        add(&mut conn, args(None, "Task", Kind::Task)).unwrap(); // 2
+        let e = up(&mut conn, json!({"id": 2, "type": "bugg"})).unwrap_err();
+        assert!(e.contains("bug, feature"), "{e}");
+        let e = up(&mut conn, json!({"id": 2, "title": "X", "stage": "soon"})).unwrap_err();
+        assert!(e.contains("in_review"), "{e}");
+        assert_eq!(row(&conn, 2).0, "Task");
         let _ = std::fs::remove_dir_all(dir);
     }
 

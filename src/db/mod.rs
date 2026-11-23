@@ -106,6 +106,15 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, migrations::latest());
+        assert_eq!(migrations::latest(), 4);
+        let new_cols: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('nodes') WHERE name IN ('work_type', 'stage')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(new_cols, 2);
         drop(conn);
         let _ = std::fs::remove_dir_all(&dir);
     }

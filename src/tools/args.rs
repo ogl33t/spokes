@@ -28,6 +28,11 @@ pub struct NodeSpec {
     pub aliases: Option<Vec<String>>,
     /// Repeat rule for a task, e.g. {"every": 2, "unit": "week", "from": "completion"} or "every 2 weeks". from "schedule" counts from the due date (bills). Marking it done resets it with the next due date.
     pub recur: Option<RecurArg>,
+    /// What sort of work: "bug", "feature", "chore", "idea" or "epic".
+    #[serde(rename = "type")]
+    pub work_type: Option<String>,
+    /// Where it is: "idea", "backlog", "brainstormed", "understood", "planned", "in_progress", "in_review" or "done". Separate from status.
+    pub stage: Option<String>,
     /// Longer body: plan, research, links. Never shown in listings.
     pub notes: Option<String>,
     /// Nodes to create beneath this one, in order. Each takes the same fields (title, kind, ordered, notes, children...).
@@ -71,6 +76,11 @@ pub struct NextArgs {
     /// Max lines (default 5), not counting up to 3 stale nudges.
     #[schemars(with = "Option<u32>")]
     pub limit: Option<NumArg>,
+    /// Only nodes of this type (bug, feature, chore, idea, epic).
+    #[serde(rename = "type")]
+    pub work_type: Option<String>,
+    /// Only nodes at this stage (e.g. in_review).
+    pub stage: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -106,6 +116,11 @@ pub struct UpdateArgs {
     pub aliases: Option<Vec<String>>,
     /// Repeat rule, e.g. {"every": 1, "unit": "month", "from": "schedule"} or "every 2 weeks"; "" stops it repeating.
     pub recur: Option<RecurArg>,
+    /// What sort of work: "bug", "feature", "chore", "idea" or "epic". "" clears it.
+    #[serde(rename = "type")]
+    pub work_type: Option<String>,
+    /// Where it is: "idea", "backlog", "brainstormed", "understood", "planned", "in_progress", "in_review" or "done". Separate from status. "" clears it.
+    pub stage: Option<String>,
     /// Replaces the whole notes body; "" clears it. To add to it, use notes_append instead.
     pub notes: Option<String>,
     /// Text appended to the end of the notes (e.g. what you did, findings).
@@ -144,6 +159,11 @@ pub struct SearchArgs {
     /// Max results (default 10).
     #[schemars(with = "Option<u32>")]
     pub limit: Option<NumArg>,
+    /// Only nodes of this type (bug, feature, chore, idea, epic).
+    #[serde(rename = "type")]
+    pub work_type: Option<String>,
+    /// Only nodes at this stage (e.g. in_review).
+    pub stage: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

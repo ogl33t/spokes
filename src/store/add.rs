@@ -5,7 +5,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use super::{ToolResult, clean_agent, db_err, log_event, renew_leases, require, touch};
 use crate::db::{now, position};
 use crate::format::parse_date;
-use crate::model::{DEFAULT_USER, Kind, NodeId, NumArg, ROOT_ID};
+use crate::model::{DEFAULT_USER, Kind, NodeId, NumArg, ROOT_ID, Stage, WorkType};
 use crate::recur::{RecurArg, RecurChange};
 use crate::tools::args::{AddArgs, NodeSpec};
 
@@ -21,6 +21,8 @@ const MAX_NEST: usize = 8;
 struct Clean {
     title: String,
     kind: Kind,
+    work_type: Option<WorkType>,
+    stage: Option<Stage>,
     ordered: bool,
     priority: Option<i64>,
     due: Option<String>,
@@ -110,8 +112,9 @@ fn insert(
     };
     tx.execute(
         "INSERT INTO nodes (user_id, parent_id, position, kind, ordered, title, priority,
-                            due_at, defer_until, aliases, recur, created_at, updated_at, touched_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?12, ?11, ?11, ?11)",
+                            due_at, defer_until, aliases, recur, work_type, stage,
+                            created_at, updated_at, touched_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?12, ?13, ?14, ?11, ?11, ?11)",
         params![
             DEFAULT_USER,
             parent.0,
@@ -124,7 +127,9 @@ fn insert(
             spec.defer,
             spec.aliases,
             now,
-            spec.recur
+            spec.recur,
+            spec.work_type.map(WorkType::as_str),
+            spec.stage.map(Stage::as_str)
         ],
     )
     .map_err(db_err)?;
@@ -183,6 +188,9 @@ fn clean_spec(
     let aliases = clean_aliases(spec.aliases.as_deref().unwrap_or_default()).map_err(at)?;
     let notes = clean_notes(spec.notes.as_deref()).map_err(at)?;
     let recur = clean_recur(spec.recur.as_ref(), kind).map_err(at)?;
+    let work_type =
+        clean_added("type", spec.work_type.as_deref(), WorkType::parse_loose).map_err(at)?;
+    let stage = clean_added("stage", spec.stage.as_deref(), Stage::parse_loose).map_err(at)?;
     let ordered = spec.ordered.unwrap_or(false);
 
     let kids = spec.children.as_deref().unwrap_or_default();
@@ -217,6 +225,8 @@ fn clean_spec(
     Ok(Clean {
         title,
         kind,
+        work_type,
+        stage,
         ordered,
         priority,
         due,
@@ -226,6 +236,33 @@ fn clean_spec(
         notes,
         children,
     })
+}
+
+/// A type or stage given on add: parsed loosely; an empty string is an error (omit the field).
+fn clean_added<T>(
+    field: &str,
+    raw: Option<&str>,
+    parse: fn(&str) -> Result<T, String>,
+) -> Result<Option<T>, String> {
+    match raw {
+        None => Ok(None),
+        Some(r) if r.trim().is_empty() => {
+            Err(format!("{field} is empty. Omit {field} to leave it unset."))
+        }
+        Some(r) => parse(r).map(Some),
+    }
+}
+
+/// A type or stage given on update: parsed loosely; an empty string clears it.
+pub(crate) fn clean_updated<T>(
+    raw: Option<&str>,
+    parse: fn(&str) -> Result<T, String>,
+) -> Result<Option<Option<T>>, String> {
+    match raw {
+        None => Ok(None),
+        Some(r) if r.trim().is_empty() => Ok(Some(None)),
+        Some(r) => parse(r).map(|v| Some(Some(v))),
+    }
 }
 
 /// `SPOKE-3..SPOKE-8, SPOKE-10`: consecutive ids collapse into ranges.
@@ -414,6 +451,45 @@ pub(crate) mod tests {
                 .unwrap_err()
                 .contains("areas can only go under areas")
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stores_type_and_stage_loosely_parsed() {
+        let (mut conn, dir) = temp_db("add-type");
+        let mut a = args(None, "Fix", Kind::Task);
+        a.node.work_type = Some("Bug".into());
+        a.node.stage = Some("In review".into());
+        add(&mut conn, a).unwrap();
+        let row: (Option<String>, Option<String>) = conn
+            .query_row("SELECT work_type, stage FROM nodes WHERE id = 2", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(row, (Some("bug".into()), Some("in_review".into())));
+        let mut a = args(None, "Empty", Kind::Task);
+        a.node.stage = Some(" ".into());
+        assert!(add(&mut conn, a).unwrap_err().contains("Omit stage"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bad_nested_type_names_child_and_writes_nothing() {
+        let (mut conn, dir) = temp_db("add-type-bad");
+        let mut a = args(None, "Plan", Kind::Task);
+        let mut bad = step("Push");
+        bad.work_type = Some("bugg".into());
+        a.node.children = Some(vec![step("ok"), bad]);
+        let err = add(&mut conn, a).unwrap_err();
+        assert!(
+            err.starts_with("children[1] (\"Push\"): unknown type"),
+            "{err}"
+        );
+        assert!(err.contains("bug, feature"), "{err}");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 

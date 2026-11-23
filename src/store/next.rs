@@ -25,7 +25,7 @@ use super::focus::{focus_numbers, too_long_note};
 use super::{NODE_COLS, ToolResult, ancestors, db_err, node_from_row, require};
 use crate::db::now;
 use crate::format::{Row, ago, due_flag, is_unplanned, parse_date, progress, render_rows};
-use crate::model::{DEFAULT_USER, Kind, Node, NodeId, ROOT_ID, Status};
+use crate::model::{DEFAULT_USER, Kind, Node, NodeId, ROOT_ID, Stage, Status, WorkType};
 use crate::tools::args::NextArgs;
 
 const DEFAULT_LIMIT: i64 = 5;
@@ -45,6 +45,14 @@ pub fn next(conn: &Connection, args: NextArgs, today: NaiveDate) -> ToolResult {
         Some(l) => l.parse("limit")?.clamp(1, MAX_LIMIT),
         None => DEFAULT_LIMIT,
     } as usize;
+    let filter = Filter {
+        work_type: args
+            .work_type
+            .as_deref()
+            .map(WorkType::parse_loose)
+            .transpose()?,
+        stage: args.stage.as_deref().map(Stage::parse_loose).transpose()?,
+    };
     let scope = require(conn, scope_id)?;
     if scope.status.is_closed() {
         return Err(format!(
@@ -86,6 +94,21 @@ pub fn next(conn: &Connection, args: NextArgs, today: NaiveDate) -> ToolResult {
             "Nothing actionable under {} {}. Add a task with add.",
             scope.id, scope.title
         ));
+    }
+
+    // The filters look at each line's own node, before anything is sorted or limited.
+    if filter.is_set() {
+        queue.needs_you.retain(|n| filter.matches(n));
+        queue.focus.retain(|i| filter.matches(&i.node));
+        queue.work.retain(|i| filter.matches(&i.node));
+        if queue.needs_you.len() + queue.focus.len() + queue.work.len() == 0 {
+            return Ok(format!(
+                "Nothing under {} {} matches {}.",
+                scope.id,
+                scope.title,
+                filter.describe()
+            ));
+        }
     }
 
     // Questions first, then stalled claims, then answered tasks (walk order within each).
@@ -239,6 +262,35 @@ pub fn next(conn: &Connection, args: NextArgs, today: NaiveDate) -> ToolResult {
     Ok(out.join("\n"))
 }
 
+/// The `type` and `stage` filters of `next`. A node matches on its own values only.
+struct Filter {
+    work_type: Option<WorkType>,
+    stage: Option<Stage>,
+}
+
+impl Filter {
+    fn is_set(&self) -> bool {
+        self.work_type.is_some() || self.stage.is_some()
+    }
+
+    fn matches(&self, n: &Node) -> bool {
+        self.work_type.is_none_or(|t| n.work_type == Some(t))
+            && self.stage.is_none_or(|s| n.stage == Some(s))
+    }
+
+    /// `type bug, stage in_review`, naming only the filters given.
+    fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(t) = self.work_type {
+            parts.push(format!("type {t}"));
+        }
+        if let Some(s) = self.stage {
+            parts.push(format!("stage {s}"));
+        }
+        parts.join(", ")
+    }
+}
+
 /// A queue entry and its effective level (own, or the nearest ancestor's).
 struct Item {
     node: Node,
@@ -264,6 +316,12 @@ fn work_row(item: &Item, tree: &Tree, today: NaiveDate) -> Row {
     }
     if node.recur.is_some() {
         flags.push("repeats".to_string());
+    }
+    if let Some(t) = node.work_type {
+        flags.push(t.to_string());
+    }
+    if let Some(s) = node.stage {
+        flags.push(s.to_string());
     }
     let mut rest = node.title.clone();
     if let Some(p) = progress(node) {
@@ -513,6 +571,8 @@ mod tests {
         NextArgs {
             scope: scope.map(IdArg::Number),
             limit: limit.map(crate::model::NumArg::Number),
+            work_type: None,
+            stage: None,
         }
     }
 
@@ -584,6 +644,96 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, "UP NEXT\n  SPOKE-3  First  unplanned");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn set_fields(conn: &Connection, id: i64, work_type: Option<&str>, stage: Option<&str>) {
+        conn.execute(
+            "UPDATE nodes SET work_type = ?1, stage = ?2 WHERE id = ?3",
+            params![work_type, stage, id],
+        )
+        .unwrap();
+    }
+
+    fn typed_tree(name: &str) -> (Connection, std::path::PathBuf) {
+        let (mut conn, dir) = temp_db(name);
+        add(&mut conn, args(None, "Home", Kind::Area)).unwrap(); // 2
+        for title in ["Crash", "Polish", "Ship"] {
+            add(&mut conn, args(Some(2), title, Kind::Task)).unwrap(); // 3, 4, 5
+        }
+        set_fields(&conn, 3, Some("bug"), Some("in_review"));
+        set_fields(&conn, 4, Some("bug"), Some("planned"));
+        set_fields(&conn, 5, Some("feature"), Some("in_review"));
+        (conn, dir)
+    }
+
+    fn run(
+        conn: &Connection,
+        work_type: Option<&str>,
+        stage: Option<&str>,
+    ) -> Result<String, String> {
+        let mut a = next_args(None, None);
+        a.work_type = work_type.map(str::to_string);
+        a.stage = stage.map(str::to_string);
+        next(conn, a, crate::format::today_in(chrono_tz::UTC))
+    }
+
+    #[test]
+    fn type_filter_keeps_only_matching_items() {
+        let (conn, dir) = typed_tree("next-type");
+        let out = run(&conn, Some("Bug"), None).unwrap();
+        assert!(out.contains("Crash") && out.contains("Polish"), "{out}");
+        assert!(!out.contains("Ship"), "{out}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stage_filter_keeps_only_matching_items() {
+        let (conn, dir) = typed_tree("next-stage");
+        let out = run(&conn, None, Some("in review")).unwrap();
+        assert!(out.contains("Crash") && out.contains("Ship"), "{out}");
+        assert!(!out.contains("Polish"), "{out}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn filters_combine_with_and() {
+        let (conn, dir) = typed_tree("next-both");
+        let out = run(&conn, Some("bug"), Some("in_review")).unwrap();
+        assert!(out.contains("Crash"), "{out}");
+        assert!(!out.contains("Polish") && !out.contains("Ship"), "{out}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn empty_filter_result_names_the_filters() {
+        let (conn, dir) = typed_tree("next-none");
+        assert_eq!(
+            run(&conn, Some("chore"), Some("done")).unwrap(),
+            "Nothing under SPOKE-1 To do matches type chore, stage done."
+        );
+        assert_eq!(
+            run(&conn, Some("chore"), None).unwrap(),
+            "Nothing under SPOKE-1 To do matches type chore."
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bad_filter_value_errors() {
+        let (conn, dir) = typed_tree("next-bad");
+        let err = run(&conn, Some("bugg"), None).unwrap_err();
+        assert!(err.contains("bug"), "{err}");
+        assert!(run(&conn, None, Some("nope")).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn lines_show_type_and_stage_flags() {
+        let (conn, dir) = typed_tree("next-flags");
+        let out = run(&conn, None, None).unwrap();
+        assert!(out.contains("SPOKE-3  bug in_review      Crash"), "{out}");
+        assert!(out.contains("SPOKE-5  feature in_review  Ship"), "{out}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

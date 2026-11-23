@@ -178,6 +178,131 @@ impl From<SettableStatus> for Status {
     }
 }
 
+/// Turns free-form input into the stored snake_case form: trims, lowercases and treats
+/// spaces and hyphens as underscores ("In review" -> "in_review").
+fn normalize_loose(s: &str) -> String {
+    s.trim().to_lowercase().replace([' ', '-'], "_")
+}
+
+/// What sort of work a node is. Stored as `work_type`; called "type" in tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkType {
+    Bug,
+    Feature,
+    Chore,
+    Idea,
+    Epic,
+}
+
+impl WorkType {
+    pub const ALL: [WorkType; 5] = [
+        WorkType::Bug,
+        WorkType::Feature,
+        WorkType::Chore,
+        WorkType::Idea,
+        WorkType::Epic,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WorkType::Bug => "bug",
+            WorkType::Feature => "feature",
+            WorkType::Chore => "chore",
+            WorkType::Idea => "idea",
+            WorkType::Epic => "epic",
+        }
+    }
+
+    /// Case-insensitive; spaces and hyphens count as underscores.
+    pub fn parse_loose(s: &str) -> Result<Self, String> {
+        let wanted = normalize_loose(s);
+        Self::ALL
+            .into_iter()
+            .find(|t| t.as_str() == wanted)
+            .ok_or_else(|| {
+                let valid: Vec<&str> = Self::ALL.iter().map(|t| t.as_str()).collect();
+                format!("unknown type '{s}'. Use one of: {}.", valid.join(", "))
+            })
+    }
+}
+
+impl fmt::Display for WorkType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for WorkType {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse_loose(s)
+    }
+}
+
+/// Where a piece of work is in its life. Independent of [`Status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Idea,
+    Backlog,
+    Brainstormed,
+    Understood,
+    Planned,
+    InProgress,
+    InReview,
+    Done,
+}
+
+impl Stage {
+    pub const ALL: [Stage; 8] = [
+        Stage::Idea,
+        Stage::Backlog,
+        Stage::Brainstormed,
+        Stage::Understood,
+        Stage::Planned,
+        Stage::InProgress,
+        Stage::InReview,
+        Stage::Done,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Stage::Idea => "idea",
+            Stage::Backlog => "backlog",
+            Stage::Brainstormed => "brainstormed",
+            Stage::Understood => "understood",
+            Stage::Planned => "planned",
+            Stage::InProgress => "in_progress",
+            Stage::InReview => "in_review",
+            Stage::Done => "done",
+        }
+    }
+
+    /// Case-insensitive; spaces and hyphens count as underscores.
+    pub fn parse_loose(s: &str) -> Result<Self, String> {
+        let wanted = normalize_loose(s);
+        Self::ALL
+            .into_iter()
+            .find(|t| t.as_str() == wanted)
+            .ok_or_else(|| {
+                let valid: Vec<&str> = Self::ALL.iter().map(|t| t.as_str()).collect();
+                format!("unknown stage '{s}'. Use one of: {}.", valid.join(", "))
+            })
+    }
+}
+
+impl fmt::Display for Stage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Stage {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse_loose(s)
+    }
+}
+
 /// A node row without its notes body (listings never load bodies).
 #[derive(Debug, Clone)]
 pub struct Node {
@@ -200,6 +325,10 @@ pub struct Node {
     pub answered_at: Option<String>,
     /// Repeat rule as stored JSON (see [`crate::recur::Rule`]); `None` = one-off.
     pub recur: Option<String>,
+    /// What sort of work it is; own value only, not inherited.
+    pub work_type: Option<WorkType>,
+    /// Where the work is; own value only, separate from status.
+    pub stage: Option<Stage>,
     pub created_at: String,
     pub updated_at: String,
     /// Last activity on the node or anything beneath it (bubbles up).
@@ -230,6 +359,25 @@ mod tests {
         assert!(IdArg::Number(-1).parse().is_err());
         assert_eq!(NumArg::Text(" 5 ".into()).parse("depth"), Ok(5));
         assert!(NumArg::Text("five".into()).parse("depth").is_err());
+    }
+
+    #[test]
+    fn parses_work_type_and_stage_loosely() {
+        assert_eq!(Stage::parse_loose("In review"), Ok(Stage::InReview));
+        assert_eq!(Stage::parse_loose("in-review"), Ok(Stage::InReview));
+        assert_eq!(Stage::parse_loose("IN_REVIEW"), Ok(Stage::InReview));
+        assert_eq!(WorkType::parse_loose("Bug"), Ok(WorkType::Bug));
+        assert_eq!("feature".parse::<WorkType>(), Ok(WorkType::Feature));
+        assert_eq!(
+            WorkType::parse_loose("bugg"),
+            Err("unknown type 'bugg'. Use one of: bug, feature, chore, idea, epic.".into())
+        );
+        assert_eq!(
+            Stage::parse_loose("reviewing"),
+            Err("unknown stage 'reviewing'. Use one of: idea, backlog, brainstormed, understood, planned, in_progress, in_review, done.".into())
+        );
+        assert_eq!(Stage::InProgress.to_string(), "in_progress");
+        assert_eq!(WorkType::Epic.as_str(), "epic");
     }
 
     #[test]

@@ -80,7 +80,7 @@ impl Spokes {
     }
 
     #[tool(
-        description = "What to work on next, one line per work item: what needs the user, the focus list, what is due or overdue, then open work by priority level, and a few stale items. Use scope to look under one node."
+        description = "What to work on next, one line per work item: what needs the user, the focus list, what is due or overdue, then open work by priority level, and a few stale items. Use scope to look under one node, type or stage to filter."
     )]
     async fn next(&self, Parameters(args): Parameters<NextArgs>) -> ToolResult {
         let today = today_in(self.tz);
@@ -88,7 +88,7 @@ impl Spokes {
     }
 
     #[tool(
-        description = "Find nodes by keywords. Pass several at once as alternatives (\"server homelab nas proxmox\"): names, synonyms, likely spellings. Tolerates typos. Each result shows its path. Search before adding."
+        description = "Find nodes by keywords. Pass several at once as alternatives (\"server homelab nas proxmox\"): names, synonyms, likely spellings. Tolerates typos. Each result shows its path. Search before adding. type and stage filter; with an empty query they list every match."
     )]
     async fn search(&self, Parameters(args): Parameters<SearchArgs>) -> ToolResult {
         let today = today_in(self.tz);
@@ -119,14 +119,14 @@ impl Spokes {
     }
 
     #[tool(
-        description = "Create a task or area under a parent (default: the root), or a whole plan in one call via nested children (set ordered: true on the parent for sequential steps). Returns the new ids. Include 2 to 5 aliases."
+        description = "Create a task or area under a parent (default: the root), or a whole plan in one call via nested children (set ordered: true on the parent for sequential steps). Returns the new ids. Include 2 to 5 aliases. Optional type (bug, feature, chore, idea, epic) and stage (idea, backlog, brainstormed, understood, planned, in_progress, in_review, done) per node."
     )]
     async fn add(&self, Parameters(args): Parameters<AddArgs>) -> ToolResult {
         self.run(move |c| store::add(c, args)).await
     }
 
     #[tool(
-        description = "Change a node's fields (title, kind, ordered, priority, due, defer_until, aliases), replace its notes, or append to them with notes_append."
+        description = "Change a node's fields (title, kind, ordered, priority, type, stage, due, defer_until, aliases), replace its notes, or append to them with notes_append."
     )]
     async fn update(&self, Parameters(args): Parameters<UpdateArgs>) -> ToolResult {
         self.run(move |c| store::update(c, args)).await

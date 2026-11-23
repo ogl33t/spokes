@@ -698,6 +698,47 @@ async fn node_fields_have_the_documented_values() {
 }
 
 #[tokio::test]
+async fn type_and_stage_are_in_node_and_tree() {
+    let dir = temp_dir("type_stage");
+    let path = dir.join("spokes.db");
+    let server = start(&path).await;
+    let m = Mcp::new(server.addr);
+
+    m.add(
+        None,
+        json!({"title": "Top", "kind": "area", "children": [
+            {"title": "Typed"}, {"title": "Plain"}]}),
+    )
+    .await;
+    let (top, typed, plain) = (
+        id_of(&path, "Top"),
+        id_of(&path, "Typed"),
+        id_of(&path, "Plain"),
+    );
+    db(&path)
+        .execute(
+            "UPDATE nodes SET work_type = 'bug', stage = 'in_review' WHERE id = ?1",
+            [typed],
+        )
+        .unwrap();
+
+    let v = m.j(&format!("/api/nodes/{}", sid(typed))).await;
+    assert_eq!(v["node"]["type"], "bug");
+    assert_eq!(v["node"]["stage"], "in_review");
+    let v = m.j(&format!("/api/nodes/{}", sid(plain))).await;
+    assert!(v["node"]["type"].is_null());
+    assert!(v["node"]["stage"].is_null());
+
+    let v = m.j(&format!("/api/tree?root={top}&depth=1")).await;
+    assert_eq!(node(&v, typed)["type"], "bug");
+    assert_eq!(node(&v, typed)["stage"], "in_review");
+    assert!(node(&v, plain)["type"].is_null());
+    assert!(node(&v, plain)["stage"].is_null());
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn node_cap_never_splits_a_group_of_children() {
     let dir = temp_dir("cap");
     let path = dir.join("spokes.db");

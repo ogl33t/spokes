@@ -63,6 +63,13 @@ const STEPS: &[Step] = &[
     // 3: when a human answered an agent's question (answer). The task is open again and
     // shown under NEEDS YOU as answered until an agent claims it or it is closed.
     Step::Sql("ALTER TABLE nodes ADD COLUMN answered_at TEXT"),
+    // 4: optional work type and stage, own values only (not inherited), stored snake_case.
+    Step::Sql(
+        "ALTER TABLE nodes ADD COLUMN work_type TEXT
+       CHECK (work_type IN ('bug','feature','chore','idea','epic'));
+     ALTER TABLE nodes ADD COLUMN stage TEXT
+       CHECK (stage IN ('idea','backlog','brainstormed','understood','planned','in_progress','in_review','done'));",
+    ),
 ];
 
 fn search_index(tx: &Transaction<'_>) -> rusqlite::Result<()> {

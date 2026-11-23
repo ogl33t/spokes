@@ -1,8 +1,8 @@
 ---
-status: In progress
+status: Done
 spoke: SPOKE-8
 started: 2026-11-23
-finished:
+finished: 2026-11-23
 summary: Add an optional type (bug/feature/chore/idea/epic) and stage field to Spokes nodes, settable via add/update, shown on lines, filterable in search and next, exposed in /api.
 ---
 
@@ -223,3 +223,27 @@ Not authorized (stop and ask): editing `ogl33t/stacks`, redeploying in Arcane, t
 - **Parallel batch 2 subagents** share one working tree and cargo target, so builds can briefly fail on another step's half-edit. Mitigation: each step's files are disjoint, and retry on foreign failures.
 - **Stale tool schemas:** this session's MCP tool schemas won't show the new args until Claude Code reconnects. The production check uses curl.
 - **spokes-view:** reads `/api` with fields added. It is additive, but if it decodes strictly it could break. A check in the production step: load spokes-view after the redeploy.
+
+## What shipped
+
+All seven steps landed in PR #1 (merged fast-forward as 9ce051e, version 0.4.0), deployed to kdev3 as `ghcr.io/ogl33t/spokes:sha-9ce051e`.
+
+**Tested how**
+- `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (71 unit + 10 API + 18 MCP + 1 backup tests) locally and in CI.
+- Release build on a fresh DB, over curl JSON-RPC to `/mcp`: add with `type: "Bug", stage: "In review"`, a bad type error, filter-only and keyword+filter search, `next type: bug`, get flags, update clearing type with stage `done` (status stayed open), `GET /api/nodes/{id}`.
+- Migration 4 on a copy of the 2026-11-22 live backup: 178 nodes load with null type/stage, `/api/tree` 200.
+- Production (container on kdev3, reached from the host since the public URL is behind Cloudflare Access): migration 4 applied on start; SPOKE-8 set to bug/in_review; `search query: "" stage: in_review` listed it; `/api/nodes/8` returned both fields with version 0.4.0; then set to feature/done.
+
+**Untested**
+- `next type: bug` in production returned "Nothing under SPOKE-1 To do matches type bug." because SPOKE-8, the only bug-typed node, was claimed by the build and claimed work is hidden from next. The filter itself is covered by unit tests and the local run.
+- spokes-view: the page returns 200 after the redeploy, but its data view was not loaded in a browser (Cloudflare Access).
+
+**Deviations**
+- The plan had not been copied into the repo after approval; it was committed to main first (787b7a3).
+- Version bumped to 0.4.0 by hand. The `.githooks` version scripts were not used (they are not set up locally and use GNU-only sed).
+- The fork had the `ci` and `codeql` workflows disabled and lacked the dependency graph that dependency review needs; both were enabled (with Brandon's OK) and CI went green.
+- Delivery step 6: instead of an Arcane redeploy of `:latest`, `ogl33t/stacks` `kdev3/spokes/compose.yaml` was pinned to `sha-9ce051e` (cd4730b, at Brandon's direction) and Arcane Git Sync redeployed it.
+- A pre-redeploy backup was taken: `/data/backups/pre-spoke8-20261123.db`.
+- Search with a filter only and no hits says "No matches for <filters>. Browse with get SPOKE-1." (no synonym hint).
+
+**Follow-ups**: SPOKE-201 (bk-flow: use the stage field), SPOKE-202 (spokes: bump-stack job).
